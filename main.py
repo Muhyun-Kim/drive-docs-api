@@ -37,7 +37,7 @@ def verify_token(request: Request):
 
 def load_doc_ids_from_json(key: str) -> list[str]:
     try:
-        with open("docid.json", "r") as f:
+        with open(DOC_ID, "r") as f:
             data = json.load(f)
         return data.get(key, [])
     except Exception as e:
