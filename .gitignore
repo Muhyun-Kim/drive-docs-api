@@ -9,4 +9,3 @@ __pycache__/
 
 # Google 서비스 계정 비밀 키
 credentials.json
-docid.json
