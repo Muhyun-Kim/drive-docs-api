@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import os
+from fastapi.responses import JSONResponse
+import json
 
 # .env 파일 로드
 load_dotenv()
@@ -11,6 +13,7 @@ load_dotenv()
 # 환경변수 읽기
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
 BEARER_TOKEN = os.getenv("DEFAULT_BEARER_TOKEN", "your-secret-token")
+DOC_ID = os.getenv("DOC_ID", "docid.json")
 
 SCOPES = [
     "https://www.googleapis.com/auth/documents.readonly",
@@ -32,51 +35,61 @@ def verify_token(request: Request):
         raise HTTPException(status_code=403, detail="Unauthorized access")
 
 
-# 여러 문서 읽기 API
-@app.get("/fetch-doc")
-async def fetch_doc(request: Request, doc_ids: List[str] = Query(...)):
+def load_doc_ids_from_json(key: str) -> list[str]:
+    try:
+        with open("docid.json", "r") as f:
+            data = json.load(f)
+        return data.get(key, [])
+    except Exception as e:
+        print(f"Failed to load doc IDs: {e}")
+        return []
+
+
+@app.get("/fetch-doc/dev-guide")
+async def fetch_dev_guide_doc(request: Request):
     verify_token(request)
 
-    # 서비스 계정 인증
+    doc_ids = load_doc_ids_from_json("dev_guide_docid")
+    if not doc_ids:
+        raise HTTPException(
+            status_code=404, detail="No doc IDs found for dev_guide_docid"
+        )
+
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
 
     drive_service = build("drive", "v3", credentials=creds)
-    docs_service = build("docs", "v1", credentials=creds)
-    sheets_service = build("sheets", "v4", credentials=creds)
-
-    combined_text = ""
+    contents = []
 
     for doc_id in doc_ids:
-        # mimeType 확인
-        file = drive_service.files().get(fileId=doc_id, fields="mimeType").execute()
-        mime_type = file.get("mimeType")
+        try:
+            file = drive_service.files().get(fileId=doc_id, fields="mimeType").execute()
+            mime_type = file.get("mimeType")
 
-        text = ""
+            if mime_type == "application/vnd.google-apps.document":
+                docs_service = build("docs", "v1", credentials=creds)
+                doc = docs_service.documents().get(documentId=doc_id).execute()
+                text = ""
+                for element in doc.get("body", {}).get("content", []):
+                    if "paragraph" in element:
+                        for el in element["paragraph"].get("elements", []):
+                            text += el.get("textRun", {}).get("content", "")
+                contents.append(f"==== DOC ID: {doc_id} ====\n{text.strip()}")
+            elif mime_type == "application/vnd.google-apps.spreadsheet":
+                sheets_service = build("sheets", "v4", credentials=creds)
+                sheet = (
+                    sheets_service.spreadsheets()
+                    .values()
+                    .get(spreadsheetId=doc_id, range="A1:Z1000")
+                    .execute()
+                )
+                rows = sheet.get("values", [])
+                text = "\n".join(["\t".join(row) for row in rows])
+                contents.append(f"==== DOC ID: {doc_id} ====\n{text.strip()}")
+            else:
+                contents.append(f"Unsupported file type for DOC ID: {doc_id}")
+        except Exception as e:
+            contents.append(f"Error reading DOC ID: {doc_id} - {str(e)}")
 
-        if mime_type == "application/vnd.google-apps.document":
-            # Google Docs 읽기
-            doc = docs_service.documents().get(documentId=doc_id).execute()
-            for element in doc.get("body", {}).get("content", []):
-                if "paragraph" in element:
-                    for el in element["paragraph"].get("elements", []):
-                        text += el.get("textRun", {}).get("content", "")
-        elif mime_type == "application/vnd.google-apps.spreadsheet":
-            # Google Sheets 읽기
-            sheet = (
-                sheets_service.spreadsheets()
-                .values()
-                .get(spreadsheetId=doc_id, range="A1:Z1000")
-                .execute()
-            )
-            rows = sheet.get("values", [])
-            text = "\n".join(["\t".join(row) for row in rows])
-        else:
-            raise HTTPException(
-                status_code=400, detail=f"Unsupported file type for doc_id: {doc_id}"
-            )
-
-        combined_text += f"\n\n=== DOC ID: {doc_id} ===\n\n{text.strip()}"
-
-    return {"content": combined_text.strip()}
+    return JSONResponse(content={"content": "\n\n".join(contents)})
